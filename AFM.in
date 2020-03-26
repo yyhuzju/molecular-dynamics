@@ -1,0 +1,144 @@
+
+# ---------- Initialize Simulation --------------------- 
+
+clear 
+units metal 
+dimension 3 
+boundary p p s 
+atom_style atomic 
+#  creating box
+region simulation_box 	block -350 350  -250 200 -10 50 units box
+create_box 4 simulation_box
+
+variable 		boundary_thickness 		equal 		10
+variable 		themostat_thickness		equal 		10
+variable 		bound_themo_thickness		equal 		${boundary_thickness}+${themostat_thickness}
+
+variable 		workpiece_xlo 			equal 		-100
+variable 		workpiece_xhi 			equal 		100
+
+variable 		workpiece_ylo 			equal 	  -80
+variable 		workpiece_yhi 			equal 		0
+
+variable 		workpiece_zlo			equal 	        0
+variable 		workpiece_zhi			equal 		36
+
+variable	 nd_xlo   equal   ${workpiece_xlo}+20
+variable	 nd_ylo   equal   ${workpiece_ylo}+20
+
+variable	 bj_left_xhigh   equal   ${workpiece_xlo}+${boundary_thickness}
+variable	 bj_down_yhigh   equal   ${workpiece_ylo}+${boundary_thickness}
+
+variable   hw_down_yhigh   equal  ${workpiece_ylo}+${bound_themo_thickness}
+variable	 hw_left_xhigh		equal	${workpiece_xlo}+${bound_themo_thickness}
+
+region			newton 			block 		${workpiece_xlo}  ${workpiece_xhi}  ${nd_ylo}  ${workpiece_yhi}  ${workpiece_zlo}  ${workpiece_zhi} 		units box
+region			boundary			block 		${workpiece_xlo}  ${workpiece_xhi} ${workpiece_ylo}  ${bj_down_yhigh}  ${workpiece_zlo}  ${workpiece_zhi}  units box							
+region			thermostat 			block 		${workpiece_xlo}  ${workpiece_xhi}  ${bj_down_yhigh} ${hw_down_yhigh} ${workpiece_zlo}  ${workpiece_zhi}  units box							
+								
+region workpiece union 3 	newton	boundary thermostat
+# Workpiece parameters
+lattice fcc 3.60 
+create_atoms 1 region newton units box
+create_atoms 2 region boundary units box
+create_atoms 3 region thermostat units box
+#-------------tip-------------------------------
+lattice     diamond 3.57   # C
+region     tip    sphere 0 30 20 20 units box
+create_atoms 4 region tip
+
+#--------------------------------------GROUP------------------------------------------
+group       workpiece     region    workpiece
+group 			boundary 			region 		boundary
+group			  thermostat 		region 		thermostat
+group 			newton 				region   newton
+group 			mobile 				union thermostat 		newton
+group    tip region tip
+#--------------- interaction-------------------
+mass              4      12
+mass              1*3    64
+
+# C-C    tersoff
+# C-Cu   morse
+# Cu-Cu  EAM
+pair_style        hybrid tersoff morse 6.6  eam
+pair_coeff        * *   tersoff ./SiC.tersoff NULL NULL NULL C   
+pair_coeff        1*3 1*3   eam ./Cu_u3.eam 
+pair_coeff        1*3 4  morse 0.1 1.7 2.2
+
+neighbor				0.3 bin
+neigh_modify		delay 10 check yes every 10
+#-------------------------------------INITIAL------------------------------------------
+
+velocity        	workpiece 		create 		293.15 	5812775	units box
+#--------------------------------------------------------------------
+#-----------------------------------COMPUTATION---------------------------------------
+							
+compute         	newton_temp 			newton 		temp		
+compute         	thermostat_temp			thermostat 	temp	
+
+#-----------------------------------EQUILIBRIUM----------------------------------------
+thermo 			100
+thermo_style 		custom step temp etotal pe epair press lx ly lz vol
+thermo_modify   	temp 				newton_temp 
+
+
+# EQUILIBRATION
+#energyequilibration
+reset_timestep   0
+timestep 0.001
+fix 1 workpiece nve
+fix 2 workpiece temp/rescale 20 293.0 293.0 1.0 0.5
+dump 3 all xyz 5000 sirelax*.xyz
+run 20000
+unfix 1
+unfix 2
+write_restart   	equal_nve.restart
+
+#temperature equilibration
+fix 1 workpiece nvt temp 293.0 293.0 1.0
+thermo 1000
+run 20000
+unfix 1
+undump 3
+write_restart   	equal_nvt.restart
+
+
+#-------------------------------------CUTTING------------------------------------------
+reset_timestep   0
+fix             	NVE 				all			nve
+velocity		boundary 			set 			0.0 	0.0 	0.0 	units box
+fix        		1 				boundary 		setforce 	0.0 	0.0 	0.0      #使边界上原子x，y，z方向的受力均为0
+fix        		3 				thermostat 		temp/rescale 	100 293.15 293.15 10 1   
+#使用直接调温法，每10步调一次,如果在293.15+-10k内不调,如调的话要求其范围在293.15+-1k之内
+
+
+
+fix cutting tip move wiggle 0.0 2.0 0.0 25.0 units box 
+
+
+#应力、温度计算
+compute						3 newton temp
+compute           1 all stress/atom 3   #  计算应力
+compute           temp all ke/atom        #势能,计算温度
+#切削力计算输出
+thermo 200
+compute 					6 tip reduce sum fx fy fz
+thermo_style 			custom step  c_6[1] c_6[2] c_6[3] c_3
+
+
+variable   volume equal 5.43^3
+variable   misvolume    atom       sqrt((c_1[1]-c_1[2])^2+(c_1[2]-c_1[3])^2+(c_1[3]-c_1[1])^2/2+3*(c_1[4]^2+c_1[5]^2+c_1[6]^2))/v_volume	
+variable	 hydvolume    atom			 -(c_1[1]+c_1[2]+c_1[3])/3/v_volume	 
+
+
+dump							7 all custom	1000 stress*.lammpstrj	id type	x y z c_1[1] c_1[2] c_1[3] c_1[4] c_1[5] c_1[6] v_misvolume v_hydvolume c_temp
+
+
+run 100000
+unfix 1
+unfix cutting
+
+
+# Simulation DONE
+print "All done"
